@@ -6,19 +6,15 @@ import torch.nn as nn
 import torchvision.models as models
 from ultralytics import YOLO
 
-# =================== 1. ЗАГРУЗКА ВСЕХ МОДЕЛЕЙ ===================
-
 device = 'cpu'
 print("🚀 ЗАПУСК СИСТЕМЫ ОТСЛЕЖИВАНИЯ ВЗГЛЯДА")
 print("="*60)
 
-# Модель для детекции глаз (YOLO)
 print("\n📦 Загрузка YOLO модели для глаз...")
 eye_model = YOLO('best.pt')
 eye_model.model.to(device)
 print("✅ YOLO модель загружена")
 
-# Модель для детекции зрачков (EyesNet)
 class Reshaper(nn.Module):
     def __init__(self, target_shape):
         super(Reshaper, self).__init__()
@@ -77,11 +73,9 @@ pupil_model.load_state_dict(state_dict)
 pupil_model.eval()
 print("✅ Модель зрачков загружена")
 
-# НАША ОБУЧЕННАЯ ResNet МОДЕЛЬ для предсказания точки
 print("\n📦 Загрузка обученной ResNet модели...")
-
 def create_resnet_model():
-    model = models.resnet18(weights=None)  # без предобученных весов
+    model = models.resnet18(weights=None)
     num_features = model.fc.in_features
     model.fc = nn.Sequential(
         nn.Linear(num_features, 128),
@@ -92,19 +86,15 @@ def create_resnet_model():
     )
     return model
 
-# Загружаем нашу обученную модель
 try:
     gaze_model = torch.load('gaze_resnet_full.pth', map_location=device)
     gaze_model.eval()
     print("✅ ResNet модель загружена (полная)")
 except:
-    # Если не получилось загрузить полную модель, пробуем загрузить веса
     gaze_model = create_resnet_model()
     gaze_model.load_state_dict(torch.load('gaze_resnet_weights.pth', map_location=device))
     gaze_model.eval()
     print("✅ ResNet модель загружена (веса)")
-
-# =================== 2. ФУНКЦИИ ДЛЯ ИЗВЛЕЧЕНИЯ ПРИЗНАКОВ ===================
 
 def calculate_iou(box1, box2):
     x1_1, y1_1, x2_1, y2_1 = box1
@@ -199,12 +189,10 @@ def detect_pupil_neural(left_eye_roi, right_eye_roi):
         return detect_pupil_simple(left_eye_roi), detect_pupil_simple(right_eye_roi)
 
 def extract_features_from_frame(frame):
-    """Извлекает 12 признаков из кадра"""
     if frame is None:
         return None
     h, w = frame.shape[:2]
     
-    # Детекция глаз через YOLO
     results = eye_model.predict(frame, conf=0.01, iou=0.4, verbose=False)
     
     if results[0].boxes is None:
@@ -215,7 +203,6 @@ def extract_features_from_frame(frame):
     if len(filtered_boxes) < 2:
         return None
     
-    # Сортируем глаза по X координате
     objects_info = []
     for box in filtered_boxes:
         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -226,31 +213,25 @@ def extract_features_from_frame(frame):
     
     objects_info.sort(key=lambda x: x['center_x'])
     
-    # Берем левый и правый глаз
     left_eye = objects_info[0]
     right_eye = objects_info[-1]
     
     left_coords = [int(c) for c in left_eye['coords']]
     right_coords = [int(c) for c in right_eye['coords']]
     
-    # Вырезаем области глаз
     left_eye_roi = frame[left_coords[1]:left_coords[3], left_coords[0]:left_coords[2]]
     right_eye_roi = frame[right_coords[1]:right_coords[3], right_coords[0]:right_coords[2]]
     
     if left_eye_roi.size == 0 or right_eye_roi.size == 0:
         return None
     
-    # Детекция зрачков
     left_pupil, right_pupil = detect_pupil_neural(left_eye_roi, right_eye_roi)
     
-    # Абсолютные координаты зрачков
     left_pupil_abs = (left_coords[0] + left_pupil[0], left_coords[1] + left_pupil[1])
     right_pupil_abs = (right_coords[0] + right_pupil[0], right_coords[1] + right_pupil[1])
     
-    # Извлекаем 12 признаков
     features = []
     
-    # 1. Центры глаз
     left_center_x = (left_coords[0] + left_coords[2]) / 2
     left_center_y = (left_coords[1] + left_coords[3]) / 2
     features.append(left_center_x / w)
@@ -261,7 +242,6 @@ def extract_features_from_frame(frame):
     features.append(right_center_x / w)
     features.append(right_center_y / h)
     
-    # 2. Относительные положения зрачков
     left_width = left_coords[2] - left_coords[0]
     left_height = left_coords[3] - left_coords[1]
     features.append((left_pupil_abs[0] - left_coords[0]) / left_width)
@@ -272,7 +252,6 @@ def extract_features_from_frame(frame):
     features.append((right_pupil_abs[0] - right_coords[0]) / right_width)
     features.append((right_pupil_abs[1] - right_coords[1]) / right_height)
     
-    # 3. Размеры глаз
     features.append(left_width / w)
     features.append(left_height / h)
     features.append(right_width / w)
@@ -280,43 +259,31 @@ def extract_features_from_frame(frame):
     
     return np.array(features, dtype=np.float32)
 
-# =================== 3. ФУНКЦИЯ ДЛЯ ПРЕДСКАЗАНИЯ ЧЕРЕЗ RESNET ===================
-
 def prepare_for_resnet(features):
-    """Преобразует 12 признаков в формат для ResNet (3, 224, 224)"""
     img_size = 224
-    # Расширяем признаки до нужного размера
     features_expanded = np.repeat(features, img_size * img_size * 3 // 12 + 1)
     features_expanded = features_expanded[:3 * img_size * img_size]
-    # Нормализуем
     features_expanded = (features_expanded - features_expanded.mean()) / (features_expanded.std() + 1e-8)
     return features_expanded.reshape(1, 3, img_size, img_size)
 
 def predict_gaze_point(features, screen_width=1920, screen_height=1080):
-    """Предсказывает точку взгляда на экране"""
     if features is None:
         return None
     
-    # Подготавливаем данные для ResNet
     input_tensor = torch.FloatTensor(prepare_for_resnet(features))
     
-    # Предсказываем
     with torch.no_grad():
         normalized_point = gaze_model(input_tensor)[0].numpy()
     
-    # Конвертируем в пиксели
     screen_x = int(normalized_point[0] * screen_width)
     screen_y = int(normalized_point[1] * screen_height)
     
     return (screen_x, screen_y)
 
-# =================== 4. ОСНОВНОЙ ЦИКЛ С ВЕБ-КАМЕРОЙ ===================
-
 def main():
     print("\n📷 ЗАПУСК ВЕБ-КАМЕРЫ")
     print("="*60)
     
-    # Открываем веб-камеру
     cap = cv2.VideoCapture(0)
     
     if not cap.isOpened():
@@ -328,11 +295,9 @@ def main():
     print("🛑 Нажмите 'q' для выхода")
     print("="*60)
     
-    # Настройки окна
     cv2.namedWindow('Gaze Tracking with ResNet', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('Gaze Tracking with ResNet', 1024, 768)
     
-    # Для сглаживания предсказаний
     history = []
     history_size = 5
     
@@ -346,41 +311,32 @@ def main():
         frame_count += 1
         h, w = frame.shape[:2]
         
-        # Копируем кадр для отрисовки
         display = frame.copy()
         
-        # Извлекаем признаки
         features = extract_features_from_frame(frame)
         
         if features is not None:
-            # Предсказываем точку
             gaze_point = predict_gaze_point(features)
             
             if gaze_point is not None:
-                # Добавляем в историю для сглаживания
                 history.append(gaze_point)
                 if len(history) > history_size:
                     history.pop(0)
                 
-                # Усредняем историю
                 avg_x = int(np.mean([p[0] for p in history]))
                 avg_y = int(np.mean([p[1] for p in history]))
                 
-                # Конвертируем в координаты на кадре (для визуализации)
                 display_x = int(avg_x * w / 1920)
                 display_y = int(avg_y * h / 1080)
                 
-                # Рисуем точку взгляда
                 cv2.circle(display, (display_x, display_y), 15, (0, 0, 255), -1)
                 cv2.circle(display, (display_x, display_y), 20, (255, 255, 255), 2)
                 
-                # Показываем координаты
                 cv2.putText(display, f"Screen: ({avg_x}, {avg_y})", 
                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 cv2.putText(display, "TRACKING ACTIVE", 
                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
-                # Рисуем bounding boxы глаз
                 results = eye_model.predict(frame, conf=0.01, iou=0.4, verbose=False)
                 if results[0].boxes is not None:
                     filtered = filter_duplicate_boxes(results[0].boxes)
@@ -394,25 +350,19 @@ def main():
             cv2.putText(display, "NO EYES DETECTED", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
-        # Информация
         cv2.putText(display, f"Frame: {frame_count}", 
                    (display.shape[1] - 150, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.putText(display, "Press 'q' to quit", 
                    (10, display.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
-        # Показываем кадр
         cv2.imshow('Gaze Tracking with ResNet', display)
         
-        # Выход по 'q'
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
     
-    # Освобождаем ресурсы
     cap.release()
     cv2.destroyAllWindows()
     print("\n✅ Программа завершена")
-
-# =================== 5. ЗАПУСК ===================
 
 if __name__ == "__main__":
     main()
