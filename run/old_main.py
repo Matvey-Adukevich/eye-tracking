@@ -1,7 +1,9 @@
+#запуск полной нейросети
 import cv2
 import numpy as np
 import torch
 import torch.nn as nn
+import torchvision.models as models
 from ultralytics import YOLO
 
 device = 'cpu'
@@ -24,30 +26,45 @@ class EyesNet(nn.Module):
     def __init__(self):
         super(EyesNet, self).__init__()
         self.features_left = nn.Sequential(
-            nn.Conv2d(1, 32, 5, 2, 2), nn.LeakyReLU(),
-            nn.Conv2d(32, 64, 3, 2, 1), nn.LeakyReLU(),
-            nn.Conv2d(64, 64, 3, 2, 1), nn.LeakyReLU(),
-            nn.Conv2d(64, 64, 3, 2, 1), nn.LeakyReLU(),
-            nn.Conv2d(64, 64, 3, 2, 1), nn.LeakyReLU(),
+            nn.Conv2d(in_channels=1, out_channels=32, kernel_size=5, stride=2, padding=2),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(),
             Reshaper([64])
         )
         self.features_right = nn.Sequential(
-            nn.Conv2d(1, 32, 5, 2, 2), nn.LeakyReLU(),
-            nn.Conv2d(32, 64, 3, 2, 1), nn.LeakyReLU(),
-            nn.Conv2d(64, 64, 3, 2, 1), nn.LeakyReLU(),
-            nn.Conv2d(64, 64, 3, 2, 1), nn.LeakyReLU(),
-            nn.Conv2d(64, 64, 3, 2, 1), nn.LeakyReLU(),
+            nn.Conv2d(in_channels=1, out_channels=32, kernel_size=5, stride=2, padding=2),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(),
             Reshaper([64])
         )
         self.fc = nn.Sequential(
-            nn.Linear(128, 64), nn.LeakyReLU(),
-            nn.Linear(64, 16), nn.LeakyReLU(),
-            nn.Linear(16, 2), nn.Sigmoid()
+            nn.Linear(128, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 16),
+            nn.LeakyReLU(),
+            nn.Linear(16, 2),
+            nn.Sigmoid()
         )
     def forward(self, x_left, x_right):
         x_left = self.features_left(x_left)
         x_right = self.features_right(x_right)
-        return self.fc(torch.cat((x_left, x_right), 1))
+        x = torch.cat((x_left, x_right), 1)
+        x = self.fc(x)
+        return x
 
 print("\n📦 Загрузка модели для детекции зрачков...")
 state_dict = torch.load('epoch_299.pth', map_location=device)
@@ -56,22 +73,28 @@ pupil_model.load_state_dict(state_dict)
 pupil_model.eval()
 print("✅ Модель зрачков загружена")
 
-class GazePredictor(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(12, 64), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(64, 32), nn.ReLU(),
-            nn.Linear(32, 2), nn.Sigmoid()
-        )
-    def forward(self, x):
-        return self.net(x)
+print("\n📦 Загрузка обученной ResNet модели...")
+def create_resnet_model():
+    model = models.resnet18(weights=None)
+    num_features = model.fc.in_features
+    model.fc = nn.Sequential(
+        nn.Linear(num_features, 128),
+        nn.ReLU(),
+        nn.Dropout(0.3),
+        nn.Linear(128, 2),
+        nn.Sigmoid()
+    )
+    return model
 
-print("\n📦 Загрузка обученной модели предсказания взгляда...")
-gaze_model = GazePredictor()
-gaze_model.load_state_dict(torch.load('gaze_predictor_own_dataset.pth', map_location=device))
-gaze_model.eval()
-print("✅ Модель предсказания загружена")
+try:
+    gaze_model = torch.load('gaze_resnet_full.pth', map_location=device)
+    gaze_model.eval()
+    print("✅ ResNet модель загружена (полная)")
+except:
+    gaze_model = create_resnet_model()
+    gaze_model.load_state_dict(torch.load('gaze_resnet_weights.pth', map_location=device))
+    gaze_model.eval()
+    print("✅ ResNet модель загружена (веса)")
 
 def calculate_iou(box1, box2):
     x1_1, y1_1, x2_1, y2_1 = box1
@@ -92,19 +115,20 @@ def filter_duplicate_boxes(boxes, iou_threshold=0.5):
     boxes_np = []
     for box in boxes:
         coords = box.xyxy[0].cpu().numpy()
-        boxes_np.append((coords, box.conf[0].cpu().numpy(), box))
+        boxes_np.append((coords, box.conf[0].cpu().numpy(), box.cls[0].cpu().numpy(), box))
     boxes_np.sort(key=lambda x: x[1], reverse=True)
     filtered_boxes = []
     used_indices = set()
-    for i, (coords_i, conf_i, box_i) in enumerate(boxes_np):
+    for i, (coords_i, conf_i, cls_i, box_i) in enumerate(boxes_np):
         if i in used_indices:
             continue
         filtered_boxes.append(box_i)
         used_indices.add(i)
-        for j, (coords_j, conf_j, box_j) in enumerate(boxes_np):
+        for j, (coords_j, conf_j, cls_j, box_j) in enumerate(boxes_np):
             if j in used_indices or i == j:
                 continue
-            if calculate_iou(coords_i, coords_j) > iou_threshold:
+            iou = calculate_iou(coords_i, coords_j)
+            if iou > iou_threshold:
                 used_indices.add(j)
     return filtered_boxes
 
@@ -115,9 +139,10 @@ def preprocess_eye_for_pupil(eye_roi):
         else:
             gray = eye_roi
         resized = cv2.resize(gray, (32, 16))
-        tensor = torch.FloatTensor(resized / 255.0).unsqueeze(0).unsqueeze(0)
+        normalized = resized / 255.0
+        tensor = torch.FloatTensor(normalized).unsqueeze(0).unsqueeze(0)
         return tensor.to(device), resized
-    except:
+    except Exception as e:
         return None, None
 
 def detect_pupil_simple(eye_roi):
@@ -135,13 +160,15 @@ def detect_pupil_simple(eye_roi):
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
-            largest = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest) > 10:
-                M = cv2.moments(largest)
+            largest_contour = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest_contour) > 10:
+                M = cv2.moments(largest_contour)
                 if M["m00"] != 0:
-                    return int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    return cx, cy
         return eye_roi.shape[1] // 2, eye_roi.shape[0] // 2
-    except:
+    except Exception as e:
         return eye_roi.shape[1] // 2, eye_roi.shape[0] // 2
 
 def detect_pupil_neural(left_eye_roi, right_eye_roi):
@@ -153,10 +180,12 @@ def detect_pupil_neural(left_eye_roi, right_eye_roi):
         with torch.no_grad():
             pupils_pred = pupil_model(left_tensor, right_tensor)
         pupil_y, pupil_x = pupils_pred[0].cpu().numpy()
-        left = (pupil_x * left_eye_roi.shape[1], pupil_y * left_eye_roi.shape[0])
-        right = (pupil_x * right_eye_roi.shape[1], pupil_y * right_eye_roi.shape[0])
-        return left, right
-    except:
+        left_pupil_x = pupil_x * left_eye_roi.shape[1]
+        left_pupil_y = pupil_y * left_eye_roi.shape[0]
+        right_pupil_x = pupil_x * right_eye_roi.shape[1]
+        right_pupil_y = pupil_y * right_eye_roi.shape[0]
+        return (left_pupil_x, left_pupil_y), (right_pupil_x, right_pupil_y)
+    except Exception as e:
         return detect_pupil_simple(left_eye_roi), detect_pupil_simple(right_eye_roi)
 
 def extract_features_from_frame(frame):
@@ -165,59 +194,83 @@ def extract_features_from_frame(frame):
     h, w = frame.shape[:2]
     
     results = eye_model.predict(frame, conf=0.01, iou=0.4, verbose=False)
+    
     if results[0].boxes is None:
         return None
     
     filtered_boxes = filter_duplicate_boxes(results[0].boxes)
+    
     if len(filtered_boxes) < 2:
         return None
     
-    objects = []
+    objects_info = []
     for box in filtered_boxes:
         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        objects.append({'coords': [x1, y1, x2, y2], 'center_x': (x1 + x2) / 2})
-    objects.sort(key=lambda x: x['center_x'])
+        objects_info.append({
+            'coords': [x1, y1, x2, y2],
+            'center_x': (x1 + x2) / 2
+        })
     
-    left = objects[0]
-    right = objects[-1]
-    left_coords = [int(c) for c in left['coords']]
-    right_coords = [int(c) for c in right['coords']]
+    objects_info.sort(key=lambda x: x['center_x'])
     
-    left_roi = frame[left_coords[1]:left_coords[3], left_coords[0]:left_coords[2]]
-    right_roi = frame[right_coords[1]:right_coords[3], right_coords[0]:right_coords[2]]
+    left_eye = objects_info[0]
+    right_eye = objects_info[-1]
     
-    if left_roi.size == 0 or right_roi.size == 0:
+    left_coords = [int(c) for c in left_eye['coords']]
+    right_coords = [int(c) for c in right_eye['coords']]
+    
+    left_eye_roi = frame[left_coords[1]:left_coords[3], left_coords[0]:left_coords[2]]
+    right_eye_roi = frame[right_coords[1]:right_coords[3], right_coords[0]:right_coords[2]]
+    
+    if left_eye_roi.size == 0 or right_eye_roi.size == 0:
         return None
     
-    left_pupil, right_pupil = detect_pupil_neural(left_roi, right_roi)
+    left_pupil, right_pupil = detect_pupil_neural(left_eye_roi, right_eye_roi)
     
     left_pupil_abs = (left_coords[0] + left_pupil[0], left_coords[1] + left_pupil[1])
     right_pupil_abs = (right_coords[0] + right_pupil[0], right_coords[1] + right_pupil[1])
     
-    left_center = ((left_coords[0] + left_coords[2]) / 2, (left_coords[1] + left_coords[3]) / 2)
-    right_center = ((right_coords[0] + right_coords[2]) / 2, (right_coords[1] + right_coords[3]) / 2)
+    features = []
     
-    left_w = left_coords[2] - left_coords[0]
-    left_h = left_coords[3] - left_coords[1]
-    right_w = right_coords[2] - right_coords[0]
-    right_h = right_coords[3] - right_coords[1]
+    left_center_x = (left_coords[0] + left_coords[2]) / 2
+    left_center_y = (left_coords[1] + left_coords[3]) / 2
+    features.append(left_center_x / w)
+    features.append(left_center_y / h)
     
-    features = [
-        left_center[0] / w, left_center[1] / h,
-        right_center[0] / w, right_center[1] / h,
-        (left_pupil_abs[0] - left_coords[0]) / left_w,
-        (left_pupil_abs[1] - left_coords[1]) / left_h,
-        (right_pupil_abs[0] - right_coords[0]) / right_w,
-        (right_pupil_abs[1] - right_coords[1]) / right_h,
-        left_w / w, left_h / h, right_w / w, right_h / h
-    ]
+    right_center_x = (right_coords[0] + right_coords[2]) / 2
+    right_center_y = (right_coords[1] + right_coords[3]) / 2
+    features.append(right_center_x / w)
+    features.append(right_center_y / h)
+    
+    left_width = left_coords[2] - left_coords[0]
+    left_height = left_coords[3] - left_coords[1]
+    features.append((left_pupil_abs[0] - left_coords[0]) / left_width)
+    features.append((left_pupil_abs[1] - left_coords[1]) / left_height)
+    
+    right_width = right_coords[2] - right_coords[0]
+    right_height = right_coords[3] - right_coords[1]
+    features.append((right_pupil_abs[0] - right_coords[0]) / right_width)
+    features.append((right_pupil_abs[1] - right_coords[1]) / right_height)
+    
+    features.append(left_width / w)
+    features.append(left_height / h)
+    features.append(right_width / w)
+    features.append(right_height / h)
+    
     return np.array(features, dtype=np.float32)
+
+def prepare_for_resnet(features):
+    img_size = 224
+    features_expanded = np.repeat(features, img_size * img_size * 3 // 12 + 1)
+    features_expanded = features_expanded[:3 * img_size * img_size]
+    features_expanded = (features_expanded - features_expanded.mean()) / (features_expanded.std() + 1e-8)
+    return features_expanded.reshape(1, 3, img_size, img_size)
 
 def predict_gaze_point(features, screen_width=1920, screen_height=1080):
     if features is None:
         return None
     
-    input_tensor = torch.FloatTensor(features).reshape(1, -1)
+    input_tensor = torch.FloatTensor(prepare_for_resnet(features))
     
     with torch.no_grad():
         normalized_point = gaze_model(input_tensor)[0].numpy()
@@ -232,6 +285,7 @@ def main():
     print("="*60)
     
     cap = cv2.VideoCapture(0)
+    
     if not cap.isOpened():
         print("❌ Не удалось открыть веб-камеру")
         return
@@ -241,11 +295,12 @@ def main():
     print("🛑 Нажмите 'q' для выхода")
     print("="*60)
     
-    cv2.namedWindow('Gaze Tracking', cv2.WINDOW_NORMAL)
-    cv2.resizeWindow('Gaze Tracking', 1024, 768)
+    cv2.namedWindow('Gaze Tracking with ResNet', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Gaze Tracking with ResNet', 1024, 768)
     
     history = []
     history_size = 5
+    
     frame_count = 0
     
     while True:
@@ -255,6 +310,7 @@ def main():
         
         frame_count += 1
         h, w = frame.shape[:2]
+        
         display = frame.copy()
         
         features = extract_features_from_frame(frame)
@@ -275,10 +331,11 @@ def main():
                 
                 cv2.circle(display, (display_x, display_y), 15, (0, 0, 255), -1)
                 cv2.circle(display, (display_x, display_y), 20, (255, 255, 255), 2)
-                cv2.putText(display, f"Gaze: ({avg_x}, {avg_y})", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                cv2.putText(display, "TRACKING ACTIVE", (10, 60), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                cv2.putText(display, f"Screen: ({avg_x}, {avg_y})", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                cv2.putText(display, "TRACKING ACTIVE", 
+                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
                 results = eye_model.predict(frame, conf=0.01, iou=0.4, verbose=False)
                 if results[0].boxes is not None:
@@ -287,18 +344,18 @@ def main():
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
                         cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
             else:
-                cv2.putText(display, "NO PREDICTION", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(display, "NO GAZE PREDICTION", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         else:
-            cv2.putText(display, "NO EYES DETECTED", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(display, "NO EYES DETECTED", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
-        cv2.putText(display, f"Frame: {frame_count}", (display.shape[1] - 150, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(display, "Press 'q' to quit", (10, display.shape[0] - 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(display, f"Frame: {frame_count}", 
+                   (display.shape[1] - 150, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(display, "Press 'q' to quit", 
+                   (10, display.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
-        cv2.imshow('Gaze Tracking', display)
+        cv2.imshow('Gaze Tracking with ResNet', display)
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
